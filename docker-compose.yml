@@ -1,0 +1,99 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────
+# Real-Time Risk Engine — Docker Compose
+#
+# Services:
+#   postgres  : PostgreSQL 15 — position and alert persistence
+#   redis     : Redis 7 — trade event stream (Redis Streams)
+#   api       : FastAPI app — risk engine + REST API
+#   simulator : Trade event generator (run manually or uncomment)
+# ─────────────────────────────────────────────────────────────
+
+services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: risk_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-riskengine}
+      POSTGRES_USER: ${POSTGRES_USER:-riskuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-riskpassword}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-riskuser} -d ${POSTGRES_DB:-riskengine}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Redis ──────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: risk_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes  # Enable AOF persistence
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Risk Engine API ────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: risk_api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Override localhost addresses with Docker service names
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-riskuser}:${POSTGRES_PASSWORD:-riskpassword}@postgres:5432/${POSTGRES_DB:-riskengine}
+    ports:
+      - "${API_PORT:-8001}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      # Mount source for live reload in development
+      - .:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ── Trade Simulator ────────────────────────────────────────
+  # Uncomment to auto-start the simulator with your chosen scenario.
+  # Or run manually: docker compose run --rm simulator --scenario var_breach
+  #
+  # simulator:
+  #   build:
+  #     context: .
+  #     dockerfile: docker/Dockerfile
+  #   container_name: risk_simulator
+  #   env_file: .env
+  #   environment:
+  #     REDIS_HOST: redis
+  #   depends_on:
+  #     redis:
+  #       condition: service_healthy
+  #   volumes:
+  #     - .:/app
+  #   command: python scripts/simulator.py --scenario normal --rate 5
+  #   profiles:
+  #     - simulator
+
+
+volumes:
+  postgres_data:
+  redis_data:

@@ -1,0 +1,29 @@
+# ─────────────────────────────────────────────
+# Real-Time Risk Engine — Python Dependencies
+# ─────────────────────────────────────────────
+
+# ── Web Framework ──────────────────────────────
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
+pydantic-settings==2.6.1
+
+# ── Database ───────────────────────────────────
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0           # Async PostgreSQL driver (used by SQLAlchemy)
+psycopg2-binary==2.9.10   # Sync driver (used for migrations / admin scripts)
+
+# ── Redis ──────────────────────────────────────
+redis[hiredis]==5.2.1     # hiredis: C extension for faster parsing
+
+# ── Numerical / Risk ───────────────────────────
+numpy==2.1.3
+
+# ── Testing ────────────────────────────────────
+pytest==8.3.4
+pytest-asyncio==0.24.0
+pytest-cov==6.0.0
+httpx==0.28.0             # Async HTTP client (used by FastAPI TestClient)
+
+# ── Dev tooling (optional) ─────────────────────
+# python-dotenv            # Auto-loaded by pydantic-settings
