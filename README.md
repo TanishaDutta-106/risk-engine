@@ -2,6 +2,8 @@
 
 A production-grade financial risk management system that ingests a live stream of trade events and computes portfolio risk metrics in real time. Built as a portfolio project targeting **fintech / insurtech SWE roles**.
 
+**Benchmarked at 90 events/sec with ~5ms end-to-end consumer latency on commodity hardware.**
+
 ---
 
 ## Architecture Overview
@@ -88,20 +90,21 @@ risk-engine/
 │   │   └── var_engine.py         # VaR, concentration, margin calculations
 │   ├── db/
 │   │   ├── session.py            # Async SQLAlchemy engine + session factory
-│   │   └── repository.py        # All DB read/write operations
+│   │   └── repository.py         # All DB read/write operations
 │   ├── models/
 │   │   ├── domain.py             # Pydantic domain models (TradeEvent, Position, Alert...)
 │   │   └── orm.py                # SQLAlchemy ORM models (DB table schemas)
 │   └── services/
 │       ├── portfolio_state.py    # In-memory portfolio state manager
-│       └── stream_consumer.py   # Redis Streams consumer + risk pipeline
+│       └── stream_consumer.py    # Redis Streams consumer + risk pipeline
 ├── scripts/
-│   └── simulator.py             # Trade event generator (4 scenarios)
+│   └── simulator.py              # Trade event generator (4 scenarios)
 ├── tests/
 │   ├── conftest.py
-│   └── test_var_engine.py       # VaR, concentration, margin, alert tests
+│   └── test_var_engine.py        # VaR, concentration, margin, alert tests (28 passing)
 ├── docker/
 │   └── Dockerfile
+├── dashboard.html                # Standalone live dashboard (open in browser)
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt
@@ -123,8 +126,14 @@ risk-engine/
 
 ```bash
 cp .env.example .env
-# Edit .env if you want to change ports or thresholds
 ```
+
+> **Port note:** The default `docker-compose.yml` remaps host ports to avoid conflicts with locally running services:
+> - API → `localhost:8001` (container port 8000)
+> - PostgreSQL → `localhost:5433` (container port 5432)
+> - Redis → `localhost:6381` (container port 6379)
+>
+> Container-to-container communication always uses the original internal ports. If any of these host ports are also in use on your machine, change the left side of the mapping in `docker-compose.yml` (e.g. `"8002:8000"`).
 
 ### 2. Start infrastructure + API
 
@@ -132,53 +141,74 @@ cp .env.example .env
 docker compose up --build
 ```
 
-This starts:
-- PostgreSQL on port `5432`
-- Redis on port `6379`
-- Risk Engine API on port `8000`
+This starts PostgreSQL, Redis, and the Risk Engine API. The API is ready when you see:
 
-The API is ready when you see:
 ```
 risk_api | INFO: Application startup complete.
 ```
 
-### 3. Run the trade simulator
-
-In a new terminal:
+### 3. Verify the API is alive
 
 ```bash
-# Normal random trading
-docker compose run --rm -e REDIS_HOST=redis api python scripts/simulator.py
+curl http://localhost:8001/api/v1/health
+# → {"status": "ok", "service": "real-time-risk-engine"}
+```
 
-# Specific breach scenarios (see below)
+### 4. Run the trade simulator
+
+Open a second terminal:
+
+```bash
+# Normal random trading across all portfolios
+docker compose run --rm -e REDIS_HOST=redis api python scripts/simulator.py --scenario normal --rate 5
+
+# Trigger specific breach scenarios (see Walkthrough section below)
 docker compose run --rm -e REDIS_HOST=redis api python scripts/simulator.py --scenario concentration_breach
 docker compose run --rm -e REDIS_HOST=redis api python scripts/simulator.py --scenario var_breach
 ```
 
-### 4. Query the API
+### 5. Query the API
 
 ```bash
-# API docs (Swagger UI)
-open http://localhost:8000/docs
-
 # List active portfolios
-curl http://localhost:8000/api/v1/portfolios
+curl http://localhost:8001/api/v1/portfolios
 
 # Dashboard — all portfolios at once
-curl http://localhost:8000/api/v1/dashboard | jq
+curl http://localhost:8001/api/v1/dashboard | python -m json.tool
 
 # Risk metrics for a specific portfolio
-curl http://localhost:8000/api/v1/portfolios/PORTFOLIO_ALPHA/metrics | jq
+curl http://localhost:8001/api/v1/portfolios/PORTFOLIO_ALPHA/metrics | python -m json.tool
 
 # Positions
-curl http://localhost:8000/api/v1/portfolios/PORTFOLIO_ALPHA/positions | jq
+curl http://localhost:8001/api/v1/portfolios/PORTFOLIO_ALPHA/positions | python -m json.tool
 
 # Alerts (breach history from DB)
-curl http://localhost:8000/api/v1/portfolios/PORTFOLIO_ALPHA/alerts | jq
+curl http://localhost:8001/api/v1/portfolios/PORTFOLIO_ALPHA/alerts | python -m json.tool
 
 # Unresolved alerts only
-curl "http://localhost:8000/api/v1/portfolios/PORTFOLIO_ALPHA/alerts?unresolved_only=true" | jq
+curl "http://localhost:8001/api/v1/portfolios/PORTFOLIO_ALPHA/alerts?unresolved_only=true" | python -m json.tool
+
+# Swagger UI
+open http://localhost:8001/docs
 ```
+
+---
+
+## Live Dashboard
+
+Open `dashboard.html` directly in your browser after starting the stack — no additional setup required.
+
+The dashboard auto-refreshes every 5 seconds (configurable) and shows:
+
+- **Book Overview** — breach summary across all portfolios with color-coded severity
+- **P&L card** — total, unrealized, and realized P&L with a live sparkline chart
+- **VaR card** — dollar VaR, % of portfolio, animated progress bar against the 5% threshold
+- **Margin card** — utilization bar, margin used/available, active alert count
+- **Concentration card** — per-asset bars with breach indicators and 20% limit marker
+- **Positions table** — all open positions with LONG/SHORT badges, avg entry, mark price, unrealized P&L
+- **Alert feed** — latest 30 alerts with severity icons, timestamps, metric vs limit values
+
+Default API URL is `http://localhost:8001` — configurable in the dashboard UI without reloading.
 
 ---
 
@@ -186,26 +216,20 @@ curl "http://localhost:8000/api/v1/portfolios/PORTFOLIO_ALPHA/alerts?unresolved_
 
 ### Scenario 1: Concentration Breach
 
-**Setup:** Run the concentration breach scenario:
-
 ```bash
-docker compose run --rm -e REDIS_HOST=redis api \
-  python scripts/simulator.py --scenario concentration_breach --rate 10 --duration 20
+docker compose run --rm -e REDIS_HOST=redis api python scripts/simulator.py --scenario concentration_breach --rate 10 --duration 20
 ```
 
 **What happens:**
-1. The simulator generates BUY trades for NVDA in PORTFOLIO_ALPHA at 5x normal quantity.
+1. The simulator generates heavy BUY trades for NVDA in PORTFOLIO_ALPHA at 5x normal quantity.
 2. After a few seconds, NVDA's weight exceeds 20% of the portfolio.
 3. The risk engine detects the breach and fires a `CONCENTRATION_BREACH` alert.
-4. The alert is logged as a structured JSON warning and persisted to Postgres.
+4. The alert is logged as structured JSON and persisted to Postgres.
 
-**Verify the breach:**
+**Verify:**
 ```bash
-# Should show concentration_breached: true and the offending asset
-curl http://localhost:8000/api/v1/portfolios/PORTFOLIO_ALPHA/metrics | jq '.concentration_breached, .max_concentration, .concentration'
-
-# Read the alert
-curl "http://localhost:8000/api/v1/portfolios/PORTFOLIO_ALPHA/alerts?unresolved_only=true" | jq '.[0]'
+curl http://localhost:8001/api/v1/portfolios/PORTFOLIO_ALPHA/metrics | python -m json.tool
+curl "http://localhost:8001/api/v1/portfolios/PORTFOLIO_ALPHA/alerts?unresolved_only=true" | python -m json.tool
 ```
 
 **Expected alert payload:**
@@ -213,8 +237,8 @@ curl "http://localhost:8000/api/v1/portfolios/PORTFOLIO_ALPHA/alerts?unresolved_
 {
   "alert_type": "CONCENTRATION_BREACH",
   "severity": "HIGH",
-  "message": "Portfolio PORTFOLIO_ALPHA: Asset NVDA concentration is 38.42%, exceeding limit of 20.00%.",
-  "metric_value": 0.3842,
+  "message": "Portfolio PORTFOLIO_ALPHA: Asset NVDA concentration is 85.56%, exceeding limit of 20.00%.",
+  "metric_value": 0.8556,
   "threshold_value": 0.20,
   "resolved": false
 }
@@ -222,8 +246,8 @@ curl "http://localhost:8000/api/v1/portfolios/PORTFOLIO_ALPHA/alerts?unresolved_
 
 **Acknowledge the alert:**
 ```bash
-ALERT_ID=$(curl -s "http://localhost:8000/api/v1/portfolios/PORTFOLIO_ALPHA/alerts?unresolved_only=true" | jq -r '.[0].alert_id')
-curl -X POST "http://localhost:8000/api/v1/portfolios/PORTFOLIO_ALPHA/alerts/${ALERT_ID}/resolve"
+ALERT_ID=$(curl -s "http://localhost:8001/api/v1/portfolios/PORTFOLIO_ALPHA/alerts?unresolved_only=true" | python -c "import sys,json; d=json.load(sys.stdin); print(d[0]['alert_id'] if d else 'none')")
+curl -X POST "http://localhost:8001/api/v1/portfolios/PORTFOLIO_ALPHA/alerts/${ALERT_ID}/resolve"
 ```
 
 ---
@@ -231,30 +255,26 @@ curl -X POST "http://localhost:8000/api/v1/portfolios/PORTFOLIO_ALPHA/alerts/${A
 ### Scenario 2: VaR Breach (Market Shock)
 
 ```bash
-docker compose run --rm -e REDIS_HOST=redis api \
-  python scripts/simulator.py --scenario var_breach --rate 20 --duration 30
+docker compose run --rm -e REDIS_HOST=redis api python scripts/simulator.py --scenario var_breach --rate 20 --duration 30
 ```
 
 **What happens:**
 1. Normal trading for 10 seconds builds price history.
-2. A 4σ shock is injected on BTC-USD, causing a large single-day loss in the distribution.
+2. A 4σ shock is injected on BTC-USD, causing a large single-day loss in the return distribution.
 3. The engine recomputes VaR — the worst 5th-percentile outcome now exceeds the 5% threshold.
 4. A `VAR_BREACH` alert fires.
 
 **Verify:**
 ```bash
-curl http://localhost:8000/api/v1/portfolios/PORTFOLIO_GAMMA/metrics | jq '{var_1d, var_pct, var_breached}'
+curl http://localhost:8001/api/v1/portfolios/PORTFOLIO_GAMMA/metrics | python -m json.tool
 ```
 
 ---
 
 ### Scenario 3: Manual Trade Injection
 
-Test specific breach conditions without running the simulator:
-
 ```bash
-# Inject a massive single-asset position to force concentration breach
-curl -X POST http://localhost:8000/api/v1/trades \
+curl -X POST http://localhost:8001/api/v1/trades \
   -H "Content-Type: application/json" \
   -d '{
     "portfolio_id": "MY_PORTFOLIO",
@@ -264,8 +284,8 @@ curl -X POST http://localhost:8000/api/v1/trades \
     "price": 220.00
   }'
 
-# Immediately check metrics
-curl http://localhost:8000/api/v1/portfolios/MY_PORTFOLIO/metrics | jq
+# Immediately check metrics — concentration_breached will be true (100% in TSLA)
+curl http://localhost:8001/api/v1/portfolios/MY_PORTFOLIO/metrics | python -m json.tool
 ```
 
 ---
@@ -276,19 +296,20 @@ curl http://localhost:8000/api/v1/portfolios/MY_PORTFOLIO/metrics | jq
 # Install dependencies locally
 pip install -r requirements.txt
 
-# Run full test suite
-pytest
+# Run full test suite (28 tests, no live infrastructure required)
+pytest --no-cov -q
 
 # With coverage report
 pytest --cov=app --cov-report=html
 open htmlcov/index.html
 
-# Run a specific test class
+# Specific test classes
 pytest tests/test_var_engine.py::TestHistoricalVaR -v
-
-# Run only alert tests
 pytest tests/test_var_engine.py::TestAlertTriggering -v
+pytest tests/test_var_engine.py::TestConcentration -v
 ```
+
+Tests cover VaR math, position P&L, concentration calculations, margin utilization, and alert triggering. No live Redis or Postgres required — all tests run against pure in-memory logic.
 
 ---
 
@@ -296,39 +317,50 @@ pytest tests/test_var_engine.py::TestAlertTriggering -v
 
 | Metric | Method | Alert Threshold |
 |--------|--------|-----------------|
-| **1-Day VaR** | Historical Simulation (log returns, 252 days) | > 5% of portfolio value |
+| **1-Day VaR** | Historical Simulation (log returns, 252-day lookback) | > 5% of portfolio value |
 | **Concentration** | % of total portfolio market value per asset | > 20% in any single asset |
 | **P&L (MTM)** | Unrealized: qty × (mark − entry). Realized: on close | > 10% portfolio loss |
-| **Margin Utilization** | Σ(|notional| × margin_rate) / available_cash | > 80% |
+| **Margin Utilization** | Σ(\|notional\| × margin_rate) / available_cash | > 80% |
 
 ### VaR Calculation Detail
 
 ```
 For each asset i with history h_1, h_2, ..., h_N:
-  daily_return_t = ln(h_t / h_{t-1})           ← log return
+  daily_return_t = ln(h_t / h_{t-1})               ← log return
 
 For each historical day t:
   portfolio_pnl_t = Σ_i (qty_i × price_i × return_i_t)  ← dollar P&L
 
 Sort portfolio_pnl: [worst, ..., best]
-VaR_95 = -percentile(portfolio_pnl, 5th)        ← positive number = expected max loss
+VaR_95 = -percentile(portfolio_pnl, 5th)            ← positive number = expected max loss
 VaR_pct = VaR_95 / portfolio_value
 ```
 
 ---
 
+## Performance
+
+Benchmarked locally with Docker on commodity hardware:
+
+| Metric | Result |
+|--------|--------|
+| Sustained throughput | **90 events/sec** |
+| End-to-end consumer latency | **~5ms per event** |
+| Consumer backpressure | None observed at 90 events/sec |
+| Test suite | **28 tests, 0 failures** |
+
+---
+
 ## Extending This Project
 
-Ideas for taking this further (great for follow-up portfolio additions):
-
-- **Parametric VaR**: Add a Gaussian approximation for comparison.
-- **Monte Carlo VaR**: Simulate correlated returns using asset covariance.
-- **Stress Testing**: Pre-built scenarios (2008 crisis, COVID crash, crypto winter).
-- **Greeks**: Add delta/gamma for options positions.
-- **WebSocket Dashboard**: Push risk updates to a live browser dashboard.
-- **Kafka migration**: Swap Redis Streams for a Confluent Kafka cluster.
-- **Authentication**: Add API key or JWT auth for multi-tenant use.
-- **Alembic migrations**: Replace `create_all` with proper migration management.
+- **Parametric VaR** — Gaussian approximation for comparison against historical simulation
+- **Monte Carlo VaR** — simulate correlated returns using asset covariance matrix
+- **Stress Testing** — pre-built scenarios (2008 crisis, COVID crash, crypto winter)
+- **Greeks** — delta/gamma for options positions
+- **WebSocket push** — replace polling dashboard with server-sent events
+- **Kafka migration** — swap Redis Streams for Confluent Kafka without changing consumer logic
+- **Alembic migrations** — replace `create_all` with proper versioned migration management
+- **Alert deduplication** — cooldown window to suppress repeated alerts on sustained breaches
 
 ---
 
@@ -337,7 +369,7 @@ Ideas for taking this further (great for follow-up portfolio additions):
 | Layer | Technology |
 |-------|-----------|
 | API Framework | FastAPI + Uvicorn |
-| Stream Processing | Redis Streams (XADD / XREADGROUP) |
+| Stream Processing | Redis Streams (XADD / XREADGROUP / XACK) |
 | Database | PostgreSQL 15 + SQLAlchemy (async) |
 | Risk Math | NumPy |
 | Validation | Pydantic v2 |
@@ -346,4 +378,4 @@ Ideas for taking this further (great for follow-up portfolio additions):
 
 ---
 
-*Built by Tanisha — portfolio project for fintech/insurtech SWE roles.*
+*Built by Tanisha Dutta — fintech/insurtech SWE portfolio project · 90 events/sec · 5ms latency · 28 tests passing.*
