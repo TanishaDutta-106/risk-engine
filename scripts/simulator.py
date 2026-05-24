@@ -311,6 +311,7 @@ class TradeSimulator:
                 f"portfolio={event.portfolio_id} "
                 f"asset={event.asset_id} "
                 f"side={event.side.value} "
+                
                 f"qty={event.quantity} "
                 f"price={event.price}"
             )
